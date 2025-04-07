@@ -43,6 +43,8 @@ Uvicorn은 클라이언트와 FastAPI 사이의 중요한 브릿지 역할을 �
 
 ![Python 이벤트 루프 동작 원리](assets/image.png)
 
+*이미지 출처: [출처](https://www.pythontutorial.net/python-concurrency/python-event-loop/)
+
 위 다이어그램은 Python 이벤트 루프와 OS의 상호작용을 보여줍니다:
 
 1. **메인 스레드**에서 태스크가 이벤트 루프의 **태스크 큐**에 제출됩니다.
@@ -53,9 +55,11 @@ Uvicorn은 클라이언트와 FastAPI 사이의 중요한 브릿지 역할을 �
 
 이러한 논블로킹 I/O 모델은 FastAPI와 같은 비동기 웹 프레임워크가 단일 스레드에서도 높은 동시성을 달성할 수 있게 합니다. 이벤트 루프는 I/O 작업이 OS에 의해 백그라운드에서 처리되는 동안 CPU 리소스를 효율적으로 활용하여 다른 태스크를 실행합니다.
 
-### 스레드 오프로딩 메커니즘
+### 이벤트루프 스레드풀 동작 메커니즘
 
 ![이벤트 루프와 스레드 상호작용](assets/image2.png)
+
+*이미지출처: [출처](https://velog.io/@young18/JS-NodeJS%EC%9D%98-%EC%95%84%ED%82%A4%ED%85%8D%EC%B2%98)
 
 이 다이어그램은 이벤트 루프가 애플리케이션과 스레드 풀 사이에서 어떻게 작업을 조율하는지 보여줍니다:
 
@@ -276,4 +280,5 @@ FastAPI와 Uvicorn의 이벤트 루프 기반 아키텍처는 효율적인 비�
 
 
 ### 참고문서
+- https://www.pythontutorial.net/python-concurrency/python-event-loop/
 - https://docs.python.org/3/library/asyncio-eventloop.html
