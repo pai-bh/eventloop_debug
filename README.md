@@ -24,7 +24,7 @@
 
 ### 이벤트 루프 동작 원리
 
-![이벤트 루프 동작 원리](assets/image.png)
+![Python 이벤트 루프 동작 원리](assets/image.png)
 
 위 다이어그램은 Python 이벤트 루프의 기본 동작 원리를 보여줍니다:
 
@@ -48,64 +48,16 @@ Uvicorn은 ASGI(Asynchronous Server Gateway Interface) 서버로, FastAPI와 같
 
 ## FastAPI 애플리케이션 시작 과정
 
-```mermaid
-sequenceDiagram
-    participant User as 사용자
-    participant Main as uvicorn.run
-    participant Server as Server 클래스
-    participant EL as 이벤트 루프
-    participant S as 소켓 리스너
-    participant LS as Lifespan
-    
-    User->>Main: FastAPI 앱 실행 (uvicorn.run)
-    Main->>+Main: Config 객체 생성
-    Main->>Server: Server 객체 생성 (config 전달)
-    Server->>+Server: server.run() 호출
-    Server->>+EL: config.setup_event_loop()
-    EL-->>-Server: 이벤트 루프 설정 완료
-    Server->>+EL: asyncio.run(server.serve())
-    Note over EL: 새 이벤트 루프 생성 및 시작
-    
-    EL->>+Server: server.serve() 실행
-    Server->>+LS: lifespan.startup() 호출
-    Note over LS: 애플리케이션 시작 이벤트 처리
-    LS-->>-Server: startup 완료
-    
-    Server->>+S: 소켓 리스너 생성
-    S-->>-Server: 소켓 생성 완료
-    
-    Server->>Server: 시작 메시지 로깅
-    Server->>Server: server.started = True
-    
-    Server->>+Server: server.main_loop() 시작
-    Note over Server: 메인 루프에서 on_tick() 주기적 실행
-    
-    Server-->>-EL: serve() 실행 중
-    
-    Note over EL: 이벤트 루프 실행 중...
-    Note over EL: HTTP 요청 대기 및 처리
-```
-
 FastAPI 애플리케이션을 실행할 때, 다음과 같은 흐름으로 진행됩니다:
 
-```python
-import uvicorn
-from fastapi import FastAPI
-
-app = FastAPI()
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
-```
-
-1. `uvicorn.run(app, ...)` 호출 (내부 로직은 아래 2~6번)
+1. `uvicorn.run(app, ...)` 호출
 2. `Config` 객체 생성 및 설정
 3. `Server` 객체 생성
 4. `server.run()` 호출
 5. 이벤트 루프 설정 및 실행
 6. 애플리케이션 시작 이벤트 처리
 
-가상환경 내의 uvicorn 코드 분석을 통해 확인할 수 있듯이, `uvicorn.main.py`의 `run()` 함수는 서버 실행의 진입점입니다:
+코드 분석을 통해 확인할 수 있듯이, `uvicorn.main.py`의 `run()` 함수는 서버 실행의 진입점입니다:
 
 ```python
 def run(app, *, host="127.0.0.1", port=8000, ...):
@@ -183,6 +135,90 @@ Python에서 `async def`로 정의된 함수는 **코루틴(coroutine)** 객체�
 
 이 과정은 앞서 설명한 이벤트 루프의 일반적인 작동 원리를 따릅니다. FastAPI 라우터 함수에서 `await`를 사용하면 I/O 작업이 필요할 때 제어권을 이벤트 루프에 반환하여 다른 요청을 처리할 수 있게 합니다. 이러한 방식으로 단일 프로세스에서도 수천 개의 동시 연결을 효율적으로 처리할 수 있습니다.
 
+### 이벤트 루프 블로킹 안티패턴
+
+```mermaid
+sequenceDiagram
+    participant Client as 클라이언트
+    participant EL as 이벤트 루프
+    participant AR as 비동기 라우터
+    participant HSync as 무거운 동기 작업
+    
+    Client->>EL: 요청 1
+    EL->>AR: async_handler() 실행
+    AR->>HSync: heavy_sync_operation() 호출
+    Note over EL,HSync: 이벤트 루프 블로킹!
+    
+    Client->>EL: 요청 2
+    Note over EL: 대기 중 (블로킹됨)
+    Client->>EL: 요청 3
+    Note over EL: 대기 중 (블로킹됨)
+    
+    HSync-->>AR: 완료 (수 초~수 분 후)
+    AR-->>EL: 응답 반환
+    EL-->>Client: 응답 1
+    
+    EL->>AR: 요청 2 처리 시작
+    Note over Client: 지연된 응답
+```
+
+비동기 라우터 내에서 무거운 동기 작업을 직접 호출하는 것은 심각한 안티패턴입니다. 다음 예시를 살펴보세요:
+
+```python
+@app.get("/bad-practice")
+async def process_data():
+    # 위험! 이벤트 루프 블로킹
+    result = heavy_cpu_bound_operation()  # 동기 함수 - 이벤트 루프 차단
+    return {"result": result}
+```
+
+이 코드의 문제점:
+- `heavy_cpu_bound_operation()`은 동기 함수로, 이벤트 루프를 차단합니다.
+- 이 작업이 실행되는 동안 **모든 다른 요청 처리가 중지**됩니다.
+- 서버 전체의 응답성이 크게 저하됩니다.
+
+### 올바른 패턴: 무거운 작업 오프로딩
+
+```mermaid
+sequenceDiagram
+    participant Client as 클라이언트
+    participant EL as 이벤트 루프
+    participant AR as 비동기 라우터
+    participant TP as 스레드풀
+    participant HSync as 무거운 동기 작업
+    
+    Client->>EL: 요청 1
+    EL->>AR: async_handler() 실행
+    AR->>TP: to_thread(heavy_sync_operation)
+    Note over TP,HSync: 별도 스레드에서 실행
+    
+    AR-->>EL: await로 제어권 반환
+    
+    Client->>EL: 요청 2
+    EL->>AR: 다른 핸들러 실행
+    AR-->>EL: 응답 반환
+    EL-->>Client: 응답 2
+    
+    TP-->>AR: 작업 완료 알림
+    AR-->>EL: 응답 반환
+    EL-->>Client: 응답 1
+```
+
+올바른 접근 방식은 CPU 바운드 작업을 별도의 스레드나 프로세스로 오프로드하는 것입니다:
+
+```python
+@app.get("/good-practice")
+async def process_data():
+    # 올바른 방법! 무거운 작업을 스레드풀로 오프로드
+    result = await asyncio.to_thread(heavy_cpu_bound_operation)
+    return {"result": result}
+```
+
+이 방식의 이점:
+- 이벤트 루프가 차단되지 않습니다.
+- 다른 요청을 계속 처리할 수 있습니다.
+- 서버 전체의 응답성이 유지됩니다.
+
 디버깅 모드에서는 다음과 같은 로그를 볼 수 있습니다:
 ```
 DEBUG:root:현재 실행 중인 이벤트 루프: <_UnixSelectorEventLoop running=True closed=False debug=True>
@@ -209,7 +245,8 @@ FastAPI와 Uvicorn의 이벤트 루프 기반 아키텍처는 효율적인 비�
 1. **I/O 바운드 작업에 `async`/`await` 사용**: 네트워크 요청, 데이터베이스 쿼리 등
 2. **CPU 바운드 작업은 스레드풀로 오프로드**: `asyncio.to_thread()` 사용
 3. **이벤트 루프 블로킹 방지**: 긴 계산 작업은 분리
-4. **비동기 클라이언트 라이브러리 사용**: `httpx`, `asyncpg` 등
+4. **비동기 클라이언트 라이브러리 사용**: `httpx`, `asyncpg`, `motor` 등
+5. **적절한 작업자 수 설정**: 코어당 1-2개 정도 권장
 
 ### 개발자를 위한 팁
 
