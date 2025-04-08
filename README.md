@@ -1,6 +1,6 @@
-|# FastAPI와 Uvicorn의 비동기 이벤트 루프 아키텍처 분석
+# FastAPI와 Uvicorn의 비동기 이벤트 루프 아키텍처 분석
 
-이 문서에서는 FastAPI와 Uvicorn의 내부 구조와 동작 원리를 살펴봅니다. 비동기 프로그래밍의 기본 개념부터 시작하여 이벤트 루프 기반 아키텍처가 어떻게 작동하는지, 그리고 FastAPI 애플리케이션의 요청 처리 흐름을 단계별로 분석합니다.
+본 문서에서는 FastAPI와 Uvicorn의 내부 구조와 동작 원리를 살펴봅니다. 비동기 프로그래밍의 기본 개념부터 시작하여 이벤트 루프 기반 아키텍처가 어떻게 작동하는지, 그리고 FastAPI 애플리케이션의 요청 처리 흐름을 단계별로 분석합니다.
 
 
 ## 목차
@@ -220,6 +220,16 @@ sequenceDiagram
 ```
 
 ### 시작 과정의 핵심 코드
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
+```
+보통 위와 같은 코드로 시작될것이다. 이 때, `uvicorn.run()` 내부 동작로직에 대해 분석이 필요하다.
 
 ```python
 # .venv/lib/python3.11/site-packages/uvicorn/main.py
