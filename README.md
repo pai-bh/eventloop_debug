@@ -3,14 +3,38 @@
 이 문서는 FastAPI와 Uvicorn의 이벤트 루프 동작 방식에 대한 심층 분석을 제공합니다.
 
 ## 목차
+0. [FastAPI는 왜 빠른가?](#fastapi는-왜-빠른가)
 1. [Uvicorn 아키텍처 개요](#uvicorn-아키텍처-개요)
 2. [이벤트 루프란?](#이벤트-루프란)
 3. [FastAPI 애플리케이션 시작 과정](#fastapi-애플리케이션-시작-과정)
 4. [이벤트 루프 생성 및 실행](#이벤트-루프-생성-및-실행)
 5. [요청 처리 흐름](#요청-처리-흐름)
 6. [비동기 라우터와 이벤트 루프 작동 방식](#비동기-라우터와-이벤트-루프-작동-방식)
-7. [애플리케이션 종료 및 정리](#애플리케이션-종료-및-정리)
-8. [결론 및 모범 사례](#결론-및-모범-사례)
+7. [비동기 안티패턴](#비동기-안티패턴)
+8. [애플리케이션 종료 및 정리](#애플리케이션-종료-및-정리)
+9. [결론 및 모범 사례](#결론-및-모범-사례)
+
+## 0. fastapi는 왜 빠른가?
+![](assets/image4.png)
+
+* 출처: FastAPI의 개발자 [Sebastián Ramírez](https://x.com/tiangolo/status/1336707150559784962)
+
+FastAPI가 빠른 이유는 다음과 같은 기술 스택의 계층적 구조 때문입니다:
+
+1. **FastAPI**는 **Starlette**을 기반으로 합니다
+   - Starlette은 빠른 웹 툴킷/마이크로 프레임워크입니다
+
+2. **Starlette**은 **Uvicorn**으로 실행됩니다
+   - Uvicorn은 ASGI 스펙을 구현한 서버입니다
+
+3. **Uvicorn**은 **Uvloop**을 사용합니다
+   - Uvloop은 Python의 asyncio를 대체하는 고성능 비동기 라이브러리입니다
+   - Uvloop은 Node.js의 비동기 I/O 핵심인 **libuv**를 기반으로 만들어졌습니다
+
+4. **Uvloop**과 **Pydantic**(FastAPI의 데이터 검증 라이브러리)은 모두 **Cython**으로 작성되었습니다
+   - Cython은 Python 코드를 C로 컴파일하여 성능을 크게 향상시키는 기술입니다
+
+이러한 계층적 구조 덕분에 FastAPI는 비동기 작업 처리와 데이터 검증에서 뛰어난 성능을 발휘합니다.
 
 ## 1. Uvicorn 아키텍처 개요
 Uvicorn은 ASGI(Asynchronous Server Gateway Interface) 서버로, FastAPI와 같은 비동기 웹 프레임워크를 실행하기 위한 인프라를 제공합니다. Uvicorn은 주로 다음 컴포넌트로 구성됩니다:
@@ -71,59 +95,200 @@ Uvicorn은 클라이언트와 FastAPI 사이의 중요한 브릿지 역할을 �
 
 이 모델은 FastAPI와 같은 프레임워크에서 중요한데, 특히 `asyncio.to_thread()`와 같은 기능을 사용하여 무거운 작업을 별도 스레드로 오프로드할 때 이 패턴을 따릅니다. 
 
-
 ## 3. FastAPI 애플리케이션 시작 과정
 
-FastAPI 애플리케이션을 실행할 때, 다음과 같은 흐름으로 진행됩니다:
+FastAPI 애플리케이션의 시작 과정은 다음과 같은 핵심 단계로 요약할 수 있습니다:
 
-1. `uvicorn.run(app, ...)` 호출
-2. `Config` 객체 생성 및 설정
-3. `Server` 객체 생성
-4. `server.run()` 호출
-5. 이벤트 루프 설정 및 실행
-6. 애플리케이션 시작 이벤트 처리
-
-코드 분석을 통해 확인할 수 있듯이, `uvicorn.main.py`의 `run()` 함수는 서버 실행의 진입점입니다:
-
-```python
-def run(app, *, host="127.0.0.1", port=8000, ...):
-    config = Config(app, host=host, port=port, ...)
-    server = Server(config=config)
+```mermaid
+sequenceDiagram
+    participant User as 사용자 코드
+    participant Uvicorn as uvicorn.run()
+    participant Config as Config 객체
+    participant Server as Server 객체
+    participant EventLoop as 이벤트 루프
+    participant App as FastAPI 앱
     
-    # ... 생략 ...
-    
-    server.run()
+    User->>Uvicorn: uvicorn.run(app, host, port, ...)
+    Uvicorn->>Config: 설정 객체 생성 및 초기화
+    Uvicorn->>Server: Server(config) 생성
+    Uvicorn->>Server: server.run()
+    Server-->>EventLoop: setup_event_loop()
+    Server-->>EventLoop: asyncio.run(serve())
+    EventLoop-->>App: lifespan 시작 이벤트
+    EventLoop-->>Server: startup() 호출
+    EventLoop-->>Server: main_loop() 실행
 ```
 
-## 이벤트 루프 생성 및 실행
-
-Uvicorn에서 이벤트 루프가 생성되고 실행되는 과정은 `Server.run()` 메서드에서 시작됩니다:
+### 시작 과정의 핵심 코드
 
 ```python
+# .venv/lib/python3.11/site-packages/uvicorn/main.py
+def run(app, host="127.0.0.1", port=8000, ...):
+    config = Config(app, host=host, port=port, ...)
+    server = Server(config=config)
+    server.run()
+
+# .venv/lib/python3.11/site-packages/uvicorn/server.py
+class Server:
+    def run(self, sockets=None):
+        self.config.setup_event_loop()
+        return asyncio.run(self.serve(sockets=sockets))
+```
+아래에서는 `self.config.setup_event_loop()` 메서드에 대해 더 깊게 살펴볼 예정입니다.
+
+이 과정을 통해 FastAPI 애플리케이션을 실행하기 위한 기반이 마련됩니다.
+
+## 4. 이벤트 루프 생성 및 실행
+
+Uvicorn에서 이벤트 루프의 생성과 실행은 서버의 핵심 작동 원리입니다. 이 과정을 자세히 살펴보겠습니다.
+
+### 4.1 이벤트 루프 설정
+
+```python
+# .venv/lib/python3.11/site-packages/uvicorn/config.py
+
+LOOP_SETUPS: dict[LoopSetupType, str | None] = {
+    "none": None,
+    "auto": "uvicorn.loops.auto:auto_loop_setup",
+    "asyncio": "uvicorn.loops.asyncio:asyncio_setup",
+    "uvloop": "uvicorn.loops.uvloop:uvloop_setup",
+}
+class Config:
+    ...
+    self.loop = 
+
+    def setup_event_loop(self) -> None:
+        loop_setup: Callable | None = import_from_string(LOOP_SETUPS[self.loop])
+        if loop_setup is not None:
+            loop_setup(use_subprocess=self.use_subprocess)
+```
+
+이 코드는 Uvicorn 서버가 사용할 `이벤트 루프 정책`을 설정합니다. 주요 옵션은:
+
+- **auto**: 기본값
+- **uvloop**: 더 빠른 C 기반 이벤트 루프 구현
+- **asyncio**: Python 표준 라이브러리의 기본 이벤트 루프
+
+```python
+# .venv/lib/python3.11/site-packages/uvicorn/loops/auto.py
+def auto_loop_setup(use_subprocess: bool = False) -> None:
+    try:
+        import uvloop  # noqa
+    except ImportError:  # pragma: no cover
+        from uvicorn.loops.asyncio import asyncio_setup as loop_setup
+
+        loop_setup(use_subprocess=use_subprocess)
+    else:  # pragma: no cover
+        from uvicorn.loops.uvloop import uvloop_setup
+
+        uvloop_setup(use_subprocess=use_subprocess)
+```
+> 확인해보니, 특정 버전 이후로는 uvicorn설치하면 uvloop가 자동으로 설치되는듯?
+
+[uvloop Github](https://github.com/MagicStack/uvloop), [uvloop 공식문서](https://magic.io/blog/uvloop-blazing-fast-python-networking/)에서 확인할 수 있듯이, asyncio보다 빠르다고 강조한다.
+![](assets/image5.png)
+
+### 4.2 이벤트 루프 생성 및 실행
+
+```python
+# .venv/lib/python3.11/site-packages/uvicorn/server.py
 def run(self, sockets=None):
     self.config.setup_event_loop()
     return asyncio.run(self.serve(sockets=sockets))
 ```
+앞서 설정된 이벤트 루프 정책(예: uvloop)에 따라 `asyncio.run()이 새로운 이벤트 루프를 생성합니다.`
 
-이 메서드는:
-1. `setup_event_loop()`를 통해 이벤트 루프 정책 설정
-2. `asyncio.run()`으로 비동기 서버 시작
-3. `self.serve()` 메서드에서 실제 서버 로직 실행
+`asyncio.run()`은 다음과 같은 작업을 수행합니다:
 
-이벤트 루프가 설정되면, `Server._serve()` 메서드에서 다음 단계로 진행됩니다:
+1. 새로운 이벤트 루프 생성
+2. 루프 내에서 코루틴(`self.serve()`) 실행
+3. 코루틴 완료 후 이벤트 루프 종료 및 정리
+
+이는 FastAPI 애플리케이션의 전체 생명주기를 관리하는 최상위 이벤트 루프입니다.
+
+### 4.3 이벤트 루프 동작 분석
+
+서버가 시작되면 이벤트 루프는 다음과 같은 단계로 작동합니다:
 
 ```python
+# .venv/lib/python3.11/site-packages/uvicorn/server.py
+async def serve(self, sockets=None):
+    with self.capture_signals():
+        await self._serve(sockets)
+
 async def _serve(self, sockets=None):
-    # ... 생략 ...
+    # 설정 로드 및 lifespan 관리자 생성
+    config = self.config
+    if not config.loaded:
+        config.load()
+    self.lifespan = config.lifespan_class(config)
+    
+    # 애플리케이션 시작
     await self.startup(sockets=sockets)
     if self.should_exit:
         return
+    
+    # 메인 이벤트 루프 실행
     await self.main_loop()
+    
+    # 서버 종료
     await self.shutdown(sockets=sockets)
-    # ... 생략 ...
 ```
 
-## 요청 처리 흐름
+이벤트 루프 실행 과정에서 중요한 단계는:
+
+1. **애플리케이션 시작 이벤트 발생**: `await self.lifespan.startup()`을 통해 ASGI 애플리케이션에 startup 이벤트를 전송하고, FastAPI의 `@app.on_event("startup")` 데코레이터로 등록된 함수들이 실행됩니다.
+
+2. **HTTP 서버 소켓 설정**: 이벤트 루프에 HTTP 서버 소켓을 등록합니다.
+   ```python
+   servers = []
+   for sock in sockets:
+       server = await loop.create_server(
+           create_protocol, sock=sock, ssl=ssl, backlog=backlog
+       )
+       servers.append(server)
+   ```
+
+3. **메인 루프 실행**: 서버가 실행되는 동안 주기적인 유지 관리 작업을 수행합니다.
+   ```python
+   async def main_loop(self):
+       counter = 0
+       should_exit = await self.on_tick(counter)
+       while not should_exit:
+           counter += 1
+           counter = counter % 864000
+           await asyncio.sleep(0.1)
+           should_exit = await self.on_tick(counter)
+   ```
+
+### 4.4 이벤트 루프와 요청 처리 메커니즘
+
+이벤트 루프가 생성된 후, 클라이언트 요청이 도착하면 다음과 같은 처리가 이루어집니다:
+
+1. **소켓 연결 수락**: 이벤트 루프는 클라이언트 연결을 비동기적으로 수락합니다.
+
+2. **프로토콜 인스턴스 생성**: 각 연결에 대해 HTTP 프로토콜 인스턴스가 생성됩니다.
+   ```python
+   def create_protocol(_loop=None):
+       return config.http_protocol_class(
+           config=config,
+           server_state=self.server_state,
+           app_state=self.lifespan.state,
+           _loop=_loop,
+       )
+   ```
+
+3. **요청 데이터 수신 및 파싱**: HTTP 프로토콜 인스턴스는 요청 데이터를 수신하고 파싱합니다.
+
+4. **ASGI 이벤트 전달**: 파싱된 요청은 ASGI 호환 이벤트로 변환되어 FastAPI 애플리케이션에 전달됩니다.
+
+5. **라우터 실행**: FastAPI는 해당 경로에 매핑된 비동기 핸들러를 실행합니다.
+
+6. **응답 생성 및 반환**: 핸들러의 반환값은 HTTP 응답으로 변환되어 클라이언트에 전송됩니다.
+
+이 모든 과정은 이벤트 루프 내에서 비동기적으로 처리되며, I/O 작업이 발생할 때마다 이벤트 루프는 다른 작업을 처리할 수 있어 서버의 처리량이 크게 향상됩니다.
+
+## 5. 요청 처리 흐름
 
 HTTP 요청이 도착하면 다음과 같은 처리 흐름을 따릅니다:
 
@@ -136,7 +301,7 @@ HTTP 요청이 도착하면 다음과 같은 처리 흐름을 따릅니다:
 
 전체 과정은 이벤트 루프에서 비동기적으로 처리됩니다. 따라서 I/O 작업이 발생하면 다른 요청을 처리할 수 있어 서버의 처리량이 향상됩니다.
 
-## 비동기 라우터와 이벤트 루프 작동 방식
+## 6. 비동기 라우터와 이벤트 루프 작동 방식
 
 FastAPI에서 비동기 라우터가 작동하는 방식은 다음과 같습니다:
 
@@ -161,8 +326,9 @@ Python에서 `async def`로 정의된 함수는 **코루틴(coroutine)** 객체�
 
 이 과정은 앞서 설명한 이벤트 루프의 일반적인 작동 원리를 따릅니다. FastAPI 라우터 함수에서 `await`를 사용하면 I/O 작업이 필요할 때 제어권을 이벤트 루프에 반환하여 다른 요청을 처리할 수 있게 합니다. 이러한 방식으로 단일 프로세스에서도 수천 개의 동시 연결을 효율적으로 처리할 수 있습니다.
 
-### ❌ 이벤트 루프 블로킹 안티패턴
-> ⚠️ 비동기 메서드 안에서, 속도가 오래걸리는 동기(Sync)메서드는 사용하면 심각한 병목이 발생됨.
+## 7. 비동기 이벤트루프 블로킹 안티패턴
+> ❌ 비동기 메서드 안에서, 속도가 오래걸리는 동기(Sync)메서드는 사용하면 심각한 병목이 발생됨.
+
 
 ```mermaid
 sequenceDiagram
@@ -177,9 +343,9 @@ sequenceDiagram
     Note over EL,HSync: 이벤트 루프 블로킹! (🚨 심각한 병목 발생)
     
     Client->>EL: 요청 2
-    Note over EL: 대기 중 (블로킹됨)
+    Note over EL: 대기 중 (🚨 블로킹됨)
     Client->>EL: 요청 3
-    Note over EL: 대기 중 (블로킹됨)
+    Note over EL: 대기 중 (🚨 블로킹됨)
     
     HSync-->>AR: 완료 (수 초~수 분 후)
     AR-->>EL: 응답 반환
@@ -195,7 +361,7 @@ sequenceDiagram
 @app.get("/bad-practice")
 async def process_data():
     # 위험! 이벤트 루프 블로킹
-    result = heavy_cpu_bound_operation()  # 동기 함수 - 이벤트 루프 차단
+    result = heavy_cpu_bound_operation()  # 🚨 동기 함수 - 이벤트 루프 차단
     return {"result": result}
 ```
 
@@ -217,7 +383,7 @@ sequenceDiagram
     Client->>EL: 요청 1
     EL->>AR: async_handler() 실행
     AR->>TP: to_thread(heavy_sync_operation)
-    Note over TP,HSync: 별도 스레드에서 실행
+    Note over TP,HSync: ✅ 별도 스레드에서 실행
     
     AR-->>EL: await로 제어권 반환
     
@@ -236,7 +402,7 @@ sequenceDiagram
 ```python
 @app.get("/good-practice")
 async def process_data():
-    # 올바른 방법! 무거운 작업을 스레드풀로 오프로드
+    # ✅ 올바른 방법! 무거운 작업을 스레드풀로 오프로드
     result = await asyncio.to_thread(heavy_cpu_bound_operation)
     return {"result": result}
 ```
@@ -247,7 +413,7 @@ async def process_data():
 - 서버 전체의 응답성이 유지됩니다.
 
 
-## 애플리케이션 종료 및 정리
+## 8. 애플리케이션 종료 및 정리
 
 애플리케이션 종료 시 다음 단계가 수행됩니다:
 
@@ -260,7 +426,7 @@ async def process_data():
 
 종료 과정은 `capture_signals()` 컨텍스트 관리자를 통해 SIGINT, SIGTERM 등의 신호를 캡처하여 시작됩니다.
 
-## 결론 및 모범 사례
+## 9. 결론 및 모범 사례
 
 FastAPI와 Uvicorn의 이벤트 루프 기반 아키텍처는 효율적인 비동기 웹 애플리케이션 개발을 위한 강력한 기반을 제공합니다. 최적의 성능을 위한 몇 가지 모범 사례:
 
@@ -282,3 +448,4 @@ FastAPI와 Uvicorn의 이벤트 루프 기반 아키텍처는 효율적인 비�
 ### 참고문서
 - https://www.pythontutorial.net/python-concurrency/python-event-loop/
 - https://docs.python.org/3/library/asyncio-eventloop.html
+- https://github.com/MagicStack/uvloop
